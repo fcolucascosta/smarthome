@@ -13,7 +13,7 @@ export async function GET() {
             method: 'GET',
         });
         // SDK may return AxiosResponse or direct data — handle both
-        const data = result?.data ?? result;
+        const data = (result as any)?.data ?? result;
         return NextResponse.json(JSON.parse(JSON.stringify(data)));
     } catch (error: any) {
         console.error('[API] /devices error:', error.message);

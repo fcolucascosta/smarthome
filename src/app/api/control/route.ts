@@ -15,7 +15,7 @@ export async function POST(request: Request) {
             method: 'POST',
             body: { commands },
         });
-        const data = result?.data ?? result;
+        const data = (result as any)?.data ?? result;
         return NextResponse.json(JSON.parse(JSON.stringify(data)));
     } catch (error: any) {
         console.error('[API] /control error:', error.message);
