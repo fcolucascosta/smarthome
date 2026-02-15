@@ -29,6 +29,18 @@ function MIcon({ name, size = 20, className = '', style = {} }: { name: string; 
     );
 }
 
+/* ─── Magnetism Helper ─── */
+const applyMagnetism = (val: number) => {
+    const SNAP_POINTS = [10, 250, 500, 750, 1000]; // 1%, 25%, 50%, 75%, 100%
+    const THRESHOLD = 50; // 5% snap range
+
+    const closest = SNAP_POINTS.reduce((prev, curr) =>
+        Math.abs(curr - val) < Math.abs(prev - val) ? curr : prev
+    );
+
+    return Math.abs(val - closest) <= THRESHOLD ? closest : val;
+};
+
 export default function DeviceCard({
     device,
     customName,
@@ -123,8 +135,9 @@ export default function DeviceCard({
         }
     };
 
-    const handleBrightness = useCallback((val: number) => {
+    const handleBrightness = useCallback((rawVal: number) => {
         if (isEditing) return;
+        const val = applyMagnetism(rawVal);
         setBrightness(val); // UI updates linearly
 
         const logValue = toLogarithmic(val); // Convert to log for device
@@ -166,8 +179,9 @@ export default function DeviceCard({
         if (workMode !== 'colour') setWorkMode('colour');
     }, [isEditing, debounced, workMode, isOn, powerCode, sendCommand]);
 
-    const handleColourBrightness = useCallback((val: number) => {
+    const handleColourBrightness = useCallback((rawVal: number) => {
         if (isEditing) return;
+        const val = applyMagnetism(rawVal);
         const newColour = { ...colour, v: val };
         setColour(newColour);
         setBrightness(val); // Sync main brightness
