@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
     TuyaDevice, getStatusValue, parseColourData,
     ColourData, WorkMode,
@@ -60,18 +60,18 @@ export default function DeviceCard({
     const MIN_VAL = 10;
 
     // Linear slider (0-1000) -> Logarithmic power (10-1000)
-    const toLogarithmic = (linear: number): number => {
+    const toLogarithmic = useCallback((linear: number): number => {
         const normalized = linear / MAX_VAL;
         const logValue = Math.pow(normalized, GAMMA) * MAX_VAL;
         return Math.max(MIN_VAL, Math.round(logValue));
-    };
+    }, []); // Stable - no external dependencies
 
     // Logarithmic power (10-1000) -> Linear slider (0-1000)
-    const toLinear = (log: number): number => {
+    const toLinear = useCallback((log: number): number => {
         const normalized = log / MAX_VAL;
         const linearValue = Math.pow(normalized, 1 / GAMMA) * MAX_VAL;
         return Math.round(linearValue);
-    };
+    }, []); // Stable - no external dependencies
 
     const initialPower = getStatusValue<boolean>(device, powerCode) ?? false;
     // Initialize brightness as LINEAR value for the slider
@@ -88,9 +88,84 @@ export default function DeviceCard({
     const [workMode, setWorkMode] = useState<WorkMode>(initialWorkMode);
     const [colour, setColour] = useState<ColourData>(initialColour);
     const [error, setError] = useState('');
+    const [isSyncing, setIsSyncing] = useState(false);
     const debounceTimers = useRef<Record<string, NodeJS.Timeout>>({});
+    const lastCommandTime = useRef<number>(0);
+
+    // Track pending commands to avoid race conditions
+    const pendingBrightness = useRef<number | null>(null);
+    const pendingColorTemp = useRef<number | null>(null);
+    const pendingColour = useRef<ColourData | null>(null);
+
+    // Sync state with device props when they change (from polling)
+    useEffect(() => {
+        // Don't overwrite if command was sent recently (avoid race conditions)
+        const timeSinceLastCommand = Date.now() - lastCommandTime.current;
+        if (timeSinceLastCommand < 3000) return;
+
+        // Don't sync during editing mode
+        if (isEditing) return;
+
+        // Clear stale pending values after 2 seconds
+        // This prevents blocking legitimate external changes (e.g., Tuya app)
+        if (timeSinceLastCommand > 2000) {
+            pendingBrightness.current = null;
+            pendingColorTemp.current = null;
+            pendingColour.current = null;
+        }
+
+        const newPower = getStatusValue<boolean>(device, powerCode) ?? false;
+        const rawBright = getStatusValue<number>(device, STATUS_CODES.BRIGHTNESS) ?? 500;
+        const newBrightness = toLinear(rawBright);
+        const newColorTemp = getStatusValue<number>(device, STATUS_CODES.COLOR_TEMP) ?? 500;
+        const newWorkMode = (getStatusValue<string>(device, STATUS_CODES.WORK_MODE) ?? 'white') as WorkMode;
+        const newColour = parseColourData(getStatusValue(device, STATUS_CODES.COLOR_DATA));
+
+        // Only update if values actually changed (prevents visual flash)
+        if (isOn !== newPower) setIsOn(newPower);
+        if (brightness !== newBrightness) setBrightness(newBrightness);
+        if (colorTemp !== newColorTemp) setColorTemp(newColorTemp);
+        if (workMode !== newWorkMode) setWorkMode(newWorkMode);
+        if (JSON.stringify(colour) !== JSON.stringify(newColour)) setColour(newColour);
+    }, [device.status, isEditing, powerCode, toLinear, isOn, brightness, colorTemp, workMode, colour]);
+
+    // Helper to sync state from device object
+    const syncStateFromDevice = useCallback((updatedDevice: TuyaDevice) => {
+        const newPower = getStatusValue<boolean>(updatedDevice, powerCode) ?? false;
+        const rawBright = getStatusValue<number>(updatedDevice, STATUS_CODES.BRIGHTNESS) ?? 500;
+        const newBrightness = toLinear(rawBright);
+        const newColorTemp = getStatusValue<number>(updatedDevice, STATUS_CODES.COLOR_TEMP) ?? 500;
+        const newWorkMode = (getStatusValue<string>(updatedDevice, STATUS_CODES.WORK_MODE) ?? 'white') as WorkMode;
+        const newColour = parseColourData(getStatusValue(updatedDevice, STATUS_CODES.COLOR_DATA));
+
+        setIsOn(newPower);
+
+        // Only update brightness if no pending command OR device matches pending
+        if (pendingBrightness.current === null || pendingBrightness.current === newBrightness) {
+            setBrightness(newBrightness);
+            pendingBrightness.current = null; // Clear pending
+        }
+
+        // Only update colorTemp if no pending command OR device matches pending
+        if (pendingColorTemp.current === null || pendingColorTemp.current === newColorTemp) {
+            setColorTemp(newColorTemp);
+            pendingColorTemp.current = null; // Clear pending
+        }
+
+        setWorkMode(newWorkMode);
+
+        // Only update colour if no pending command OR device matches pending
+        if (pendingColour.current === null ||
+            JSON.stringify(pendingColour.current) === JSON.stringify(newColour)) {
+            setColour(newColour);
+            pendingColour.current = null; // Clear pending
+        }
+    }, [powerCode, toLinear]);
 
     const sendCommand = useCallback(async (commands: { code: string; value: any }[]) => {
+        setIsSyncing(true);
+        lastCommandTime.current = Date.now();
+
         try {
             const res = await axios.post('/api/control', { deviceId: device.id, commands });
             if (!res.data?.success) {
@@ -98,13 +173,22 @@ export default function DeviceCard({
                 setTimeout(() => setError(''), 4000);
                 return false;
             }
+
+            // If server returns updated device state, sync immediately
+            if (res.data?.device?.status) {
+                const updatedDevice = { ...device, status: res.data.device.status };
+                syncStateFromDevice(updatedDevice);
+            }
+
             return true;
         } catch {
             setError('Erro');
             setTimeout(() => setError(''), 4000);
             return false;
+        } finally {
+            setTimeout(() => setIsSyncing(false), 1000);
         }
-    }, [device.id]);
+    }, [device, syncStateFromDevice]);
 
     const debounced = useCallback((key: string, commands: { code: string; value: any }[]) => {
         if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
@@ -125,7 +209,7 @@ export default function DeviceCard({
         if (!success) setIsOn(!next); // Revert
     };
 
-    const ensureOn = (logBrightness?: number) => {
+    const ensureOn = useCallback((logBrightness?: number) => {
         if (!isOn) {
             setIsOn(true);
             const commands: { code: string; value: any }[] = [{ code: powerCode, value: true }];
@@ -133,12 +217,13 @@ export default function DeviceCard({
             if (logBrightness) commands.push({ code: STATUS_CODES.BRIGHTNESS, value: logBrightness });
             sendCommand(commands);
         }
-    };
+    }, [isOn, powerCode, sendCommand]);
 
     const handleBrightness = useCallback((rawVal: number) => {
         if (isEditing) return;
         const val = applyMagnetism(rawVal);
         setBrightness(val); // UI updates linearly
+        pendingBrightness.current = val; // Track pending value (LINEAR)
 
         const logValue = toLogarithmic(val); // Convert to log for device
 
@@ -147,26 +232,29 @@ export default function DeviceCard({
         } else {
             debounced('brightness', [{ code: STATUS_CODES.BRIGHTNESS, value: logValue }]);
         }
-    }, [isEditing, debounced, isOn, sendCommand]);
+    }, [isEditing, debounced, isOn, toLogarithmic, ensureOn]);
 
     const handleColorTemp = useCallback((val: number) => {
         if (isEditing) return;
         setColorTemp(val);
+        pendingColorTemp.current = val; // Track pending value
         ensureOn();
         debounced('colortemp', [{ code: STATUS_CODES.COLOR_TEMP, value: val }]);
-    }, [isEditing, debounced, isOn, powerCode, sendCommand]);
+    }, [isEditing, debounced, ensureOn]);
 
-    const handleWorkMode = (mode: WorkMode) => {
+    const handleWorkMode = useCallback((mode: WorkMode) => {
         if (isEditing) return;
         if (workMode === mode) return;
         setWorkMode(mode);
         ensureOn();
         sendCommand([{ code: STATUS_CODES.WORK_MODE, value: mode }]);
-    };
+    }, [isEditing, workMode, ensureOn, sendCommand]);
 
     const handleColour = useCallback((c: ColourData) => {
         if (isEditing) return;
         setColour(c);
+        pendingColour.current = c; // Track pending value
+        pendingBrightness.current = c.v; // Colour brightness = main brightness
         ensureOn();
 
         const colourStr = JSON.stringify({ h: c.h, s: c.s, v: c.v });
@@ -177,7 +265,7 @@ export default function DeviceCard({
 
         debounced('colour', commands);
         if (workMode !== 'colour') setWorkMode('colour');
-    }, [isEditing, debounced, workMode, isOn, powerCode, sendCommand]);
+    }, [isEditing, debounced, workMode, ensureOn]);
 
     const handleColourBrightness = useCallback((rawVal: number) => {
         if (isEditing) return;
@@ -185,11 +273,13 @@ export default function DeviceCard({
         const newColour = { ...colour, v: val };
         setColour(newColour);
         setBrightness(val); // Sync main brightness
+        pendingColour.current = newColour; // Track pending value
+        pendingBrightness.current = val; // Sync main brightness
         ensureOn();
 
         const colourStr = JSON.stringify({ h: newColour.h, s: newColour.s, v: newColour.v });
         debounced('colour', [{ code: STATUS_CODES.COLOR_DATA, value: colourStr }]);
-    }, [isEditing, colour, debounced, isOn, powerCode, sendCommand]);
+    }, [isEditing, colour, debounced, ensureOn]);
 
     const handleRenameClick = (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -311,7 +401,7 @@ export default function DeviceCard({
                             {displayName}
                         </h3>
                         <p className="text-sm font-medium tracking-wide" style={{ color: '#C4C6D0' }}>
-                            {!device.online ? 'Offline' : isOn ? 'LIGADO' : 'DESLIGADO'}
+                            {isSyncing ? 'Sincronizando...' : !device.online ? 'Offline' : isOn ? 'LIGADO' : 'DESLIGADO'}
                         </p>
                     </div>
                 </div>
