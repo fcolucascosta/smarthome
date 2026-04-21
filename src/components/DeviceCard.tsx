@@ -53,30 +53,10 @@ export default function DeviceCard({
     const displayName = customName || device.name;
 
     const powerCode = isLight ? STATUS_CODES.SWITCH_LED : STATUS_CODES.SWITCH_1;
-    /* ─── Helpers ─── */
-    // Gamma correction for natural brightness perception
-    const GAMMA = 2.5;
-    const MAX_VAL = 1000;
-    const MIN_VAL = 10;
-
-    // Linear slider (0-1000) -> Logarithmic power (10-1000)
-    const toLogarithmic = useCallback((linear: number): number => {
-        const normalized = linear / MAX_VAL;
-        const logValue = Math.pow(normalized, GAMMA) * MAX_VAL;
-        return Math.max(MIN_VAL, Math.round(logValue));
-    }, []); // Stable - no external dependencies
-
-    // Logarithmic power (10-1000) -> Linear slider (0-1000)
-    const toLinear = useCallback((log: number): number => {
-        const normalized = log / MAX_VAL;
-        const linearValue = Math.pow(normalized, 1 / GAMMA) * MAX_VAL;
-        return Math.round(linearValue);
-    }, []); // Stable - no external dependencies
 
     const initialPower = getStatusValue<boolean>(device, powerCode) ?? false;
-    // Initialize brightness as LINEAR value for the slider
     const rawBrightness = getStatusValue<number>(device, STATUS_CODES.BRIGHTNESS) ?? 500;
-    const initialBrightness = toLinear(rawBrightness);
+    const initialBrightness = rawBrightness;
 
     const initialColorTemp = getStatusValue<number>(device, STATUS_CODES.COLOR_TEMP) ?? 500;
     const initialWorkMode = getStatusValue<WorkMode>(device, STATUS_CODES.WORK_MODE) ?? 'white';
@@ -115,8 +95,7 @@ export default function DeviceCard({
         }
 
         const newPower = getStatusValue<boolean>(device, powerCode) ?? false;
-        const rawBright = getStatusValue<number>(device, STATUS_CODES.BRIGHTNESS) ?? 500;
-        const newBrightness = toLinear(rawBright);
+        const newBrightness = getStatusValue<number>(device, STATUS_CODES.BRIGHTNESS) ?? 500;
         const newColorTemp = getStatusValue<number>(device, STATUS_CODES.COLOR_TEMP) ?? 500;
         const newWorkMode = (getStatusValue<string>(device, STATUS_CODES.WORK_MODE) ?? 'white') as WorkMode;
         const newColour = parseColourData(getStatusValue(device, STATUS_CODES.COLOR_DATA));
@@ -127,40 +106,36 @@ export default function DeviceCard({
         if (colorTemp !== newColorTemp) setColorTemp(newColorTemp);
         if (workMode !== newWorkMode) setWorkMode(newWorkMode);
         if (JSON.stringify(colour) !== JSON.stringify(newColour)) setColour(newColour);
-    }, [device.status, isEditing, powerCode, toLinear, isOn, brightness, colorTemp, workMode, colour]);
+    }, [device.status, isEditing, powerCode, isOn, brightness, colorTemp, workMode, colour]);
 
-    // Helper to sync state from device object
-    const syncStateFromDevice = useCallback((updatedDevice: TuyaDevice) => {
+    // Helper to sync state from device object.
+    // powerOnly=true skips slider values (used after sending a command, since those are already set optimistically).
+    const syncStateFromDevice = useCallback((updatedDevice: TuyaDevice, powerOnly = false) => {
         const newPower = getStatusValue<boolean>(updatedDevice, powerCode) ?? false;
-        const rawBright = getStatusValue<number>(updatedDevice, STATUS_CODES.BRIGHTNESS) ?? 500;
-        const newBrightness = toLinear(rawBright);
-        const newColorTemp = getStatusValue<number>(updatedDevice, STATUS_CODES.COLOR_TEMP) ?? 500;
-        const newWorkMode = (getStatusValue<string>(updatedDevice, STATUS_CODES.WORK_MODE) ?? 'white') as WorkMode;
-        const newColour = parseColourData(getStatusValue(updatedDevice, STATUS_CODES.COLOR_DATA));
-
         setIsOn(newPower);
 
-        // Only update brightness if no pending command OR device matches pending
-        if (pendingBrightness.current === null || pendingBrightness.current === newBrightness) {
-            setBrightness(newBrightness);
-            pendingBrightness.current = null; // Clear pending
-        }
+        if (!powerOnly) {
+            const newBrightness = getStatusValue<number>(updatedDevice, STATUS_CODES.BRIGHTNESS) ?? 500;
+            const newColorTemp = getStatusValue<number>(updatedDevice, STATUS_CODES.COLOR_TEMP) ?? 500;
+            const newWorkMode = (getStatusValue<string>(updatedDevice, STATUS_CODES.WORK_MODE) ?? 'white') as WorkMode;
+            const newColour = parseColourData(getStatusValue(updatedDevice, STATUS_CODES.COLOR_DATA));
 
-        // Only update colorTemp if no pending command OR device matches pending
-        if (pendingColorTemp.current === null || pendingColorTemp.current === newColorTemp) {
-            setColorTemp(newColorTemp);
-            pendingColorTemp.current = null; // Clear pending
+            if (pendingBrightness.current === null || pendingBrightness.current === newBrightness) {
+                setBrightness(newBrightness);
+                pendingBrightness.current = null;
+            }
+            if (pendingColorTemp.current === null || pendingColorTemp.current === newColorTemp) {
+                setColorTemp(newColorTemp);
+                pendingColorTemp.current = null;
+            }
+            setWorkMode(newWorkMode);
+            if (pendingColour.current === null ||
+                JSON.stringify(pendingColour.current) === JSON.stringify(newColour)) {
+                setColour(newColour);
+                pendingColour.current = null;
+            }
         }
-
-        setWorkMode(newWorkMode);
-
-        // Only update colour if no pending command OR device matches pending
-        if (pendingColour.current === null ||
-            JSON.stringify(pendingColour.current) === JSON.stringify(newColour)) {
-            setColour(newColour);
-            pendingColour.current = null; // Clear pending
-        }
-    }, [powerCode, toLinear]);
+    }, [powerCode]);
 
     const sendCommand = useCallback(async (commands: { code: string; value: any }[]) => {
         setIsSyncing(true);
@@ -174,10 +149,10 @@ export default function DeviceCard({
                 return false;
             }
 
-            // If server returns updated device state, sync immediately
+            // If server returns updated device state, only sync power (sliders already set optimistically)
             if (res.data?.device?.status) {
                 const updatedDevice = { ...device, status: res.data.device.status };
-                syncStateFromDevice(updatedDevice);
+                syncStateFromDevice(updatedDevice, true);
             }
 
             return true;
@@ -209,12 +184,11 @@ export default function DeviceCard({
         if (!success) setIsOn(!next); // Revert
     };
 
-    const ensureOn = useCallback((logBrightness?: number) => {
+    const ensureOn = useCallback((brightnessVal?: number) => {
         if (!isOn) {
             setIsOn(true);
             const commands: { code: string; value: any }[] = [{ code: powerCode, value: true }];
-            // If turning on with specific brightness, include it
-            if (logBrightness) commands.push({ code: STATUS_CODES.BRIGHTNESS, value: logBrightness });
+            if (brightnessVal) commands.push({ code: STATUS_CODES.BRIGHTNESS, value: brightnessVal });
             sendCommand(commands);
         }
     }, [isOn, powerCode, sendCommand]);
@@ -222,17 +196,15 @@ export default function DeviceCard({
     const handleBrightness = useCallback((rawVal: number) => {
         if (isEditing) return;
         const val = applyMagnetism(rawVal);
-        setBrightness(val); // UI updates linearly
-        pendingBrightness.current = val; // Track pending value (LINEAR)
-
-        const logValue = toLogarithmic(val); // Convert to log for device
+        setBrightness(val);
+        pendingBrightness.current = val;
 
         if (!isOn) {
-            ensureOn(logValue);
+            ensureOn(val);
         } else {
-            debounced('brightness', [{ code: STATUS_CODES.BRIGHTNESS, value: logValue }]);
+            debounced('brightness', [{ code: STATUS_CODES.BRIGHTNESS, value: val }]);
         }
-    }, [isEditing, debounced, isOn, toLogarithmic, ensureOn]);
+    }, [isEditing, debounced, isOn, ensureOn]);
 
     const handleColorTemp = useCallback((val: number) => {
         if (isEditing) return;
@@ -280,6 +252,38 @@ export default function DeviceCard({
         const colourStr = JSON.stringify({ h: newColour.h, s: newColour.s, v: newColour.v });
         debounced('colour', [{ code: STATUS_CODES.COLOR_DATA, value: colourStr }]);
     }, [isEditing, colour, debounced, ensureOn]);
+
+    const handlePresetNight = useCallback(() => {
+        if (controlsDisabled) return;
+        setBrightness(10);
+        setColorTemp(0);
+        pendingBrightness.current = 10;
+        pendingColorTemp.current = 0;
+        if (workMode !== 'white') setWorkMode('white');
+        const commands: { code: string; value: any }[] = [
+            { code: STATUS_CODES.WORK_MODE, value: 'white' },
+            { code: STATUS_CODES.BRIGHTNESS, value: 10 },
+            { code: STATUS_CODES.COLOR_TEMP, value: 0 },
+        ];
+        if (!isOn) { setIsOn(true); commands.unshift({ code: powerCode, value: true }); }
+        sendCommand(commands);
+    }, [controlsDisabled, isOn, workMode, powerCode, sendCommand]);
+
+    const handlePresetDay = useCallback(() => {
+        if (controlsDisabled) return;
+        setBrightness(1000);
+        setColorTemp(1000);
+        pendingBrightness.current = 1000;
+        pendingColorTemp.current = 1000;
+        if (workMode !== 'white') setWorkMode('white');
+        const commands: { code: string; value: any }[] = [
+            { code: STATUS_CODES.WORK_MODE, value: 'white' },
+            { code: STATUS_CODES.BRIGHTNESS, value: 1000 },
+            { code: STATUS_CODES.COLOR_TEMP, value: 1000 },
+        ];
+        if (!isOn) { setIsOn(true); commands.unshift({ code: powerCode, value: true }); }
+        sendCommand(commands);
+    }, [controlsDisabled, isOn, workMode, powerCode, sendCommand]);
 
     const handleRenameClick = (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -438,6 +442,29 @@ export default function DeviceCard({
                 >
                     <MIcon name="palette" size={20} />
                     Cor
+                </button>
+            </div>
+
+            {/* Presets */}
+            <div
+                className="flex gap-2"
+                style={{ opacity: controlsDisabled ? 0.3 : 1, pointerEvents: controlsDisabled ? 'none' : 'auto' }}
+            >
+                <button
+                    onClick={handlePresetNight}
+                    className="flex items-center gap-2 flex-1 justify-center py-2 px-3 rounded-full text-sm font-medium transition-all"
+                    style={{ background: 'rgba(255,255,255,0.05)', color: '#C4C6D0', border: '1px solid rgba(255,255,255,0.08)' }}
+                >
+                    <MIcon name="bedtime" size={18} />
+                    Noite
+                </button>
+                <button
+                    onClick={handlePresetDay}
+                    className="flex items-center gap-2 flex-1 justify-center py-2 px-3 rounded-full text-sm font-medium transition-all"
+                    style={{ background: 'rgba(255,255,255,0.05)', color: '#C4C6D0', border: '1px solid rgba(255,255,255,0.08)' }}
+                >
+                    <MIcon name="wb_sunny" size={18} />
+                    Dia
                 </button>
             </div>
 
